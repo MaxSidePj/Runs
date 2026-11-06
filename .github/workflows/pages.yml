@@ -1,32 +1,26 @@
 name: Publish Stride
-
 on:
   push:
     branches: [main]
   workflow_dispatch:
-
 permissions:
   contents: read
+  actions: read
   pages: write
   id-token: write
-
 concurrency:
   group: stride-pages
   cancel-in-progress: true
-
 jobs:
-  publish:
+  build:
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    environment:
-      name: github-pages
-      url: ${{ steps.deploy.outputs.page_url }}
-
+    outputs:
+      artifact_id: ${{ steps.upload.outputs.artifact_id }}
     steps:
       - uses: actions/checkout@v4
         with:
           ref: main
-
       - name: Check JavaScript and prepare public files
         run: |
           node --check core.js
@@ -35,12 +29,45 @@ jobs:
           node --check sw.js
           mkdir -p _site
           cp index.html style.css app.js core.js imports.js sw.js manifest.webmanifest icon.svg icon-180.png icon-192.png icon-512.png _site/
-
       - uses: actions/configure-pages@v5
-
       - uses: actions/upload-pages-artifact@v3
+        id: upload
         with:
+          name: github-pages
           path: _site
-
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - name: Wait for the uploaded Pages artifact
+        uses: actions/github-script@v7
+        env:
+          EXPECTED_ARTIFACT_ID: ${{ needs.build.outputs.artifact_id }}
+        with:
+          script: |
+            const expected = process.env.EXPECTED_ARTIFACT_ID;
+            if (!expected) {
+              throw new Error('The build did not return a Pages artifact ID.');
+            }
+            for (let attempt = 1; attempt <= 12; attempt++) {
+              const artifacts = await github.paginate(
+                github.rest.actions.listWorkflowRunArtifacts,
+                { ...context.repo, run_id: context.runId, per_page: 100 }
+              );
+              if (artifacts.some(a => String(a.id) === expected &&
+                  a.name === 'github-pages' && !a.expired)) {
+                core.info('The uploaded Pages artifact is visible.');
+                return;
+              }
+              core.info(`Waiting for artifact visibility (${attempt}/12).`);
+              if (attempt < 12) await new Promise(r => setTimeout(r, 5000));
+            }
+            throw new Error('GitHub has not listed the uploaded Pages artifact. Start a new workflow run.');
       - id: deploy
         uses: actions/deploy-pages@v4
+        with:
+          artifact_name: github-pages
