@@ -74,6 +74,7 @@ export function suggest(runs,profile,checkin={},today=isoDate()) {
     increase=true;
     reason='Two logged weeks were consistent and felt manageable. A small volume increase is optional, not a target you must hit.';
   }
+  const baseTarget=target;
   const weeks=Math.floor(daysBetween(profile.created,today)/7);
   if(weeks>0&&weeks%4===3){target*=.85;increase=false;reason='A lighter week to consolidate training.';}
   if(feeling==='tired'){target=Math.min(target,profile.weeklyKm)*.8;increase=false;reason='You feel tired today. Reduce this week and keep the next session easy.';}
@@ -87,7 +88,9 @@ export function suggest(runs,profile,checkin={},today=isoDate()) {
   const recovery=last?.effort>=7||feeling==='tired'?3:frequency<=3?2:1;
   if(last&&daysBetween(last.date,today)<recovery) earliest=shift(last.date,recovery);
   let remaining=Math.max(0,target-stat.weekKm),remainingRuns=Math.max(0,frequency-stat.weekRuns);
-  for(let offset=0;offset<14&&sessions.length<frequency;offset++){
+  const nextWeek=shift(start,7);
+  const stage0=beginner?Math.floor(runs.filter(r=>r.date>=profile.created&&r.date<start).length/Math.max(2,frequency)):null;
+  for(let offset=0;shift(today,offset)<nextWeek&&sessions.length<frequency;offset++){
     const d=shift(today,offset);
     if(d<earliest||!selected.includes(dateOf(d).getDay())||runs.some(r=>r.date===d))continue;
     if(profile.raceDate&&d>=profile.raceDate)continue;
@@ -98,19 +101,88 @@ export function suggest(runs,profile,checkin={},today=isoDate()) {
     const proposed=isLong?longKm:ordinary;
     const km=beginner?null:Math.round(Math.min(proposed,thisWeek?remaining:target)*10)/10;
     if(!beginner&&km<1)continue;
-    sessions.push({date:d,type:beginner?'Run / walk':isLong?'Easy long run':'Easy run',km,
-      detail:beginner?'5 min walk, then 8 × (1 min easy jog + 90 sec walk), then 5 min walk. Repeat comfortably before progressing.':'Use a conversational effort. Finish feeling you could keep going.'});
+    sessions.push(beginner?{date:d,...runWalk(stage0)}:isLong?{date:d,km,long:true,...longRun(km)}:{date:d,type:'Easy run',km,detail:EASY});
     if(thisWeek){remaining=Math.max(0,remaining-(km||0));remainingRuns--;}
   }
-  const next=sessions[0];
+  const raceWeek=profile.raceDate?weekStart(profile.raceDate):null;
+  const phase0=raceWeek===start?'race':raceWeek===nextWeek?'taper':weeks%4===3?'lighter':beginner?'run-walk':'build';
+  const q0=beginner||feeling==='tired'||last?.effort>=7?null:quality(longBase,weeks,phase0,frequency);
+  const slot=sessions.find(s=>!s.long);
+  if(q0&&slot)Object.assign(slot,q0,{quality:true});
+  if(raceWeek===start)sessions.push(raceDay(profile.raceDate));
+  const baseLong=Math.min(GOAL_KM,Math.max(0,Math.min(longBase?longBase+(increase?.5:0):baseTarget*.35,baseTarget*.45)));
+  const weekPlan=[{start,phase:phase0,km:beginner?null:target,sessions},...projectWeeks({profile,start,frequency,
+    ordered:[...selected].sort((a,b)=>((a+6)%7)-((b+6)%7)),baseKm:baseTarget,baseLong,absStart:weeks,stage:stage0,
+    lastDate:sessions.filter(s=>!s.race).at(-1)?.date||last?.date,earliest})];
+  const next=weekPlan.flatMap(w=>w.sessions)[0];
   let body=reason;
+  if(beginner&&stage0>=STAGES.length)body+=' You have completed the run/walk build-up. Update Settings with your usual weekly kilometres to get distance targets.';
   if(beginner&&profile.targetDays>3)body+=' While starting from zero, use up to three run/walk sessions and use extra days for gentle walking or recovery.';
   if(available.length>selected.length||profile.currentDays>available.length)body+=' Frequency is limited by your available days and current habit.';
   if(daysToRace!=null&&daysToRace<56&&(beginner||longBase<8))body+=' The race is close relative to your current long run. Do not accelerate this plan to meet the date; consider a run/walk goal or a later event.';
   if(next&&next.date>today)body+=' Today can be a rest day.';
-  return {kind:beginner?'beginner':'train',title:next?`${next.type}${next.km!=null?' · '+next.km.toFixed(1)+' km':''}`:'Keep the remaining days easy',
-    body,next,sessions,targetKm:beginner?null:target,frequency,daysToRace,
+  return {kind:beginner?'beginner':'train',title:next?`${next.type}${next.km!=null?' · '+next.km.toFixed(1)+' km':next.minutes?' · '+next.minutes+' min':''}`:'Keep the remaining days easy',
+    body,next,sessions:weekPlan.slice(0,2).flatMap(w=>w.sessions),weeks:weekPlan,outlook:outlook(weekPlan,profile),targetKm:beginner?null:target,frequency,daysToRace,
     note:'Suggestions are conservative planning rules, not a validated personalised coaching programme. They do not assess race readiness.'};
+}
+const EASY='Conversational effort. Finish feeling you could keep going.';
+export const STAGES=[['8 × (1 min easy jog + 90 sec walk)',20],['6 × (2 min easy jog + 2 min walk)',24],['5 × (3 min easy jog + 2 min walk)',25],
+  ['4 × (5 min easy jog + 2 min walk)',28],['3 × (8 min easy jog + 2 min walk)',30],['2 × (12 min easy jog + 2 min walk)',28],
+  ['20 min continuous easy jog',20],['25 min continuous easy jog',25],['30 min continuous easy jog',30]];
+function runWalk(stage){const [text,minutes]=STAGES[Math.min(stage,STAGES.length-1)];
+  return {type:'Run / walk',km:null,minutes:minutes+10,detail:`5 min walk, then ${text}, then 5 min walk. Repeat a stage if it felt hard. There is no rush.`};}
+function longRun(km){return km>=GOAL_KM-.05?{type:'10-mile run',detail:'Your goal distance at an easy, conversational pace. Walk breaks are fine.'}
+  :{type:'Easy long run',detail:'Conversational pace the whole way; walk breaks are fine.'+(km>=12?' Practise drinking and fuelling as you would on race day.':'')};}
+function raceDay(date){return {date,type:'Race day · 10 miles',km:GOAL_KM,race:true,detail:'Start slower than feels necessary and settle in. Walk breaks are allowed. Skip it if you have pain.'};}
+export function quality(longKm,absWeek,phase,frequency){
+  const strides={type:'Easy run + strides',detail:'Easy conversational run, then 6 × 20 sec quick-but-relaxed strides with a full walk back. Not a sprint.'};
+  if(phase==='race')return {type:'Easy run + strides',detail:'Short and relaxed, then 4 × 15 sec smooth strides with a full walk back. Save your legs for race day.'};
+  if(frequency<3||absWeek<2||phase==='lighter')return strides;
+  if(phase==='taper')return {type:'Short intervals',detail:'10 min easy, 4 × 2 min at a strong 10K effort with 2 min easy jog between, 10 min easy. Crisp, not exhausting.'};
+  const p=longKm/GOAL_KM;
+  if(p<.4)return strides;
+  if(p<.7)return {type:'Intervals',detail:`10 min easy, then ${4+Math.min(2,Math.floor((p-.4)/.1))} × 3 min hard-but-controlled (about 10K effort; only a few words possible) with 2 min easy jog between, then 10 min easy.`};
+  return {type:'Tempo run',detail:`10 min easy, then ${Math.min(25,15+5*Math.floor((p-.7)/.1))} min “comfortably hard” (about 10-mile race effort; short phrases only), then 10 min easy.`};
+}
+const half=x=>Math.round(x*2)/2;
+function projectWeeks({profile,start,frequency,ordered,baseKm,baseLong,absStart,stage,lastDate,earliest}){
+  const raceWeek=profile.raceDate?weekStart(profile.raceDate):null,ratio=frequency<=3?.5:.45,result=[];
+  const limit=raceWeek?Math.min(52,daysBetween(start,raceWeek)/7):30;
+  let W=baseKm,L=baseLong,graduated=stage==null,hold=true,prev=lastDate;
+  for(let i=1;i<=limit;i++){
+    const ws=shift(start,7*i),abs=absStart+i,toRace=raceWeek?daysBetween(ws,raceWeek)/7:null;
+    const walk=stage!=null&&stage+i<STAGES.length?stage+i:null;
+    if(walk==null&&!graduated){graduated=true;hold=true;W=Math.max(W,frequency*3.5);L=Math.max(L,4.5);}
+    const phase=toRace===0?'race':walk!=null?'run-walk':toRace===1?'taper':abs%4===3?'lighter':'build';
+    if(phase==='build'&&!hold&&L<GOAL_KM-.05){W=Math.min(W*1.08,W+2);L=Math.max(L,Math.min(GOAL_KM,L+1,ratio*W));}
+    if(phase==='build')hold=false;
+    let w=W,l=L;
+    if(phase==='lighter'){w=W*.8;l=Math.max(L*.75,L-2);}
+    if(phase==='taper'){w=W*.7;l=L*.7;}
+    let dates=ordered.map(d=>shift(ws,(d+6)%7)),sessions;
+    if(phase==='race'){
+      sessions=dates.filter(d=>d<shift(profile.raceDate,-1)).slice(0,Math.min(2,frequency-1)).map((d,n)=>walk!=null?{date:d,...runWalk(walk)}
+        :{date:d,km:half(Math.max(2,Math.min(6,L*.4))),...(n===0?{...quality(L,abs,'race',frequency),quality:true}:{type:'Easy run',detail:EASY})});
+      sessions.push(raceDay(profile.raceDate));
+    }else if(walk!=null)sessions=dates.map(d=>({date:d,...runWalk(walk)}));
+    else{
+      const other=half(Math.min(l,(w-l)/Math.max(1,dates.length-1))),q=quality(L,abs,phase,frequency);
+      sessions=dates.map((d,n)=>n===dates.length-1?{date:d,km:l>=GOAL_KM-.05?GOAL_KM:half(l),long:true,...longRun(l)}
+        :n===0&&q?{date:d,km:other,...q,quality:true}:{date:d,km:other,type:'Easy run',detail:EASY}).filter(s=>s.km>=1);
+    }
+    sessions=sessions.filter(s=>{if(s.race)return true;if(s.date<earliest||(prev&&daysBetween(prev,s.date)<(frequency<=3?2:1)))return false;prev=s.date;return true;});
+    result.push({start:ws,phase,km:walk!=null?null:half(sessions.reduce((n,s)=>n+(s.race?0:s.km),0)),longKm:walk!=null?null:half(l),sessions});
+    if(!raceWeek&&phase==='build'&&l>=GOAL_KM-.05)break;
+  }
+  return result;
+}
+function outlook(weeks,profile){
+  const longs=weeks.filter(w=>!['race','taper'].includes(w.phase)).flatMap(w=>w.sessions.filter(s=>s.long));
+  const peak=Math.max(0,...longs.map(s=>s.km)),goal=longs.find(s=>s.km>=GOAL_KM-.05);
+  if(profile.raceDate)return peak>=GOAL_KM*.8?`Your long run builds to about ${peak.toFixed(1)} km before tapering into race day.`
+    :`At this gradual build your longest run reaches about ${peak.toFixed(1)} km before race day. Plan walk breaks for the race or choose a later event rather than speeding the plan up.`;
+  return goal?`At this gradual build you would cover the full 10 miles around ${dateOf(goal.date).toLocaleDateString(undefined,{day:'numeric',month:'long',year:'numeric'})}. Add a race date in Settings to taper towards it.`
+    :'Add a race date in Settings to see a plan that tapers towards it.';
 }
 export function parseCSV(text) {
   const rows=[];let row=[],cell='',quoted=false;
