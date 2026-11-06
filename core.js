@@ -96,7 +96,6 @@ export function suggest(runs,profile,checkin={},today=isoDate()) {
     if(profile.raceDate&&d>=profile.raceDate)continue;
     const thisWeek=d<shift(start,7);
     if(thisWeek&&remainingRuns===0)continue;
-    if(sessions.length&&daysBetween(sessions.at(-1).date,d)<(frequency<=3||sessions.at(-1).type==='Easy long run'?2:1))continue;
     const isLong=!beginner&&selected.length>1&&dateOf(d).getDay()===[...selected].sort((a,b)=>((a+6)%7)-((b+6)%7)).at(-1);
     const proposed=isLong?longKm:ordinary;
     const km=beginner?null:Math.round(Math.min(proposed,thisWeek?remaining:target)*10)/10;
@@ -110,10 +109,8 @@ export function suggest(runs,profile,checkin={},today=isoDate()) {
   const slot=sessions.find(s=>!s.long);
   if(q0&&slot)Object.assign(slot,q0,{quality:true});
   if(raceWeek===start)sessions.push(raceDay(profile.raceDate));
-  const baseLong=Math.min(GOAL_KM,Math.max(0,Math.min(longBase?longBase+(increase?.5:0):baseTarget*.35,baseTarget*.45)));
   const weekPlan=[{start,phase:phase0,km:beginner?null:target,sessions},...projectWeeks({profile,start,frequency,
-    ordered:[...selected].sort((a,b)=>((a+6)%7)-((b+6)%7)),baseKm:baseTarget,baseLong,absStart:weeks,stage:stage0,
-    lastDate:sessions.filter(s=>!s.race).at(-1)?.date||last?.date,earliest})];
+    ordered:[...selected].sort((a,b)=>((a+6)%7)-((b+6)%7)),baseKm:baseTarget,longBase,absStart:weeks,stage:stage0,earliest})];
   const next=weekPlan.flatMap(w=>w.sessions)[0];
   let body=reason;
   if(beginner&&stage0>=STAGES.length)body+=' You have completed the run/walk build-up. Update Settings with your usual weekly kilometres to get distance targets.';
@@ -145,43 +142,52 @@ export function quality(longKm,absWeek,phase,frequency){
   return {type:'Tempo run',detail:`10 min easy, then ${Math.min(25,15+5*Math.floor((p-.7)/.1))} min “comfortably hard” (about 10-mile race effort; short phrases only), then 10 min easy.`};
 }
 const half=x=>Math.round(x*2)/2;
-function projectWeeks({profile,start,frequency,ordered,baseKm,baseLong,absStart,stage,lastDate,earliest}){
-  const raceWeek=profile.raceDate?weekStart(profile.raceDate):null,ratio=frequency<=3?.5:.45,result=[];
-  const limit=raceWeek?Math.min(52,daysBetween(start,raceWeek)/7):30;
-  let W=baseKm,L=baseLong,graduated=stage==null,hold=true,prev=lastDate;
-  for(let i=1;i<=limit;i++){
-    const ws=shift(start,7*i),abs=absStart+i,toRace=raceWeek?daysBetween(ws,raceWeek)/7:null;
-    const walk=stage!=null&&stage+i<STAGES.length?stage+i:null;
-    if(walk==null&&!graduated){graduated=true;hold=true;W=Math.max(W,frequency*3.5);L=Math.max(L,4.5);}
-    const phase=toRace===0?'race':walk!=null?'run-walk':toRace===1?'taper':abs%4===3?'lighter':'build';
-    if(phase==='build'&&!hold&&L<GOAL_KM-.05){W=Math.min(W*1.08,W+2);L=Math.max(L,Math.min(GOAL_KM,L+1,ratio*W));}
-    if(phase==='build')hold=false;
-    let w=W,l=L;
-    if(phase==='lighter'){w=W*.8;l=Math.max(L*.75,L-2);}
-    if(phase==='taper'){w=W*.7;l=L*.7;}
-    let dates=ordered.map(d=>shift(ws,(d+6)%7)),sessions;
+// Mid-week distance grows with the long run (about 45% of it with three runs a week), within 3–10 km.
+function midKm(L,f){return Math.min(10,Math.max(3,(f<=2?.6:f===3?.45:.38)*L+1));}
+function projectWeeks({profile,start,frequency:f,ordered,baseKm,longBase,absStart,stage,earliest}){
+  const result=[],raceWeek=profile.raceDate?weekStart(profile.raceDate):null,R=raceWeek?daysBetween(start,raceWeek)/7:null;
+  const first=(stage!=null?Math.max(0,STAGES.length-1-stage):0)+1;
+  const L0=Math.min(Math.max(GOAL_KM,longBase||0),stage!=null?4.5:Math.max(3,longBase||baseKm*.35));
+  const baseMid=stage!=null?3:f>1?Math.min(L0,Math.max(0,(baseKm-L0)/(f-1))):0;
+  const last=R??first+29,peakWeek=R!=null?R-2:null,phases=[];
+  for(let i=1;i<=last;i++)phases.push(R!=null&&i===R?'race':i<first?'run-walk':R!=null&&i===R-1?'taper'
+    :i>first+1&&(R!=null?(peakWeek-i)%4===3:(i-first)%4===3)?'lighter':'build');
+  const builds=phases.filter(p=>p==='build').length;
+  const step=R!=null?Math.min(1.5,Math.max(0,(GOAL_KM-L0)/Math.max(1,builds))):1;
+  let k=0,L=L0,M=Math.max(baseMid,midKm(L0,f)),prevW=Math.max(baseKm,L0+baseMid*(f-1));
+  if(L0+M*(f-1)>prevW*1.1+1)M=Math.max(baseMid,(prevW*1.1+1-L0)/Math.max(1,f-1));
+  for(let i=1;i<=last;i++){
+    const phase=phases[i-1],ws=shift(start,7*i),abs=absStart+i,dates=ordered.map(d=>shift(ws,(d+6)%7));
+    const walk=stage!=null&&i<first?stage+i:null;let sessions,l=null;
     if(phase==='race'){
-      sessions=dates.filter(d=>d<shift(profile.raceDate,-1)).slice(0,Math.min(2,frequency-1)).map((d,n)=>walk!=null?{date:d,...runWalk(walk)}
-        :{date:d,km:half(Math.max(2,Math.min(6,L*.4))),...(n===0?{...quality(L,abs,'race',frequency),quality:true}:{type:'Easy run',detail:EASY})});
+      const before=dates.filter(d=>d<profile.raceDate),pick=[...before.filter(d=>d<shift(profile.raceDate,-1)),...before.filter(d=>d===shift(profile.raceDate,-1))].slice(0,Math.max(0,f-1)).sort();
+      sessions=pick.map((d,n)=>walk!=null?{date:d,...runWalk(walk)}:n===0?{date:d,km:half(Math.max(4,M*.8)),...quality(L,abs,'race',f),quality:true}
+        :{date:d,km:half(Math.max(3,M*.6)),type:'Easy run',detail:d===shift(profile.raceDate,-1)?'Very easy shake-out. Keep it short and relaxed.':EASY});
       sessions.push(raceDay(profile.raceDate));
     }else if(walk!=null)sessions=dates.map(d=>({date:d,...runWalk(walk)}));
     else{
-      const other=half(Math.min(l,(w-l)/Math.max(1,dates.length-1))),q=quality(L,abs,phase,frequency);
+      let m;
+      if(phase==='build'){k++;L=L0>=GOAL_KM?L0:Math.min(GOAL_KM,L0+step*k);if(GOAL_KM-L<.6)L=Math.max(L,GOAL_KM);m=Math.max(M,midKm(L,f));
+        const cap=prevW*1.1+1;if(L+m*(f-1)>cap)m=Math.max(M,(cap-L)/Math.max(1,f-1));M=m;prevW=L+m*(f-1);l=L;}
+      else if(phase==='lighter'){l=L*.75;m=M*.8;}
+      else{l=L*(L<12?.8:.65);m=M*.85;}
+      const q=quality(L,abs,phase,f);
       sessions=dates.map((d,n)=>n===dates.length-1?{date:d,km:l>=GOAL_KM-.05?GOAL_KM:half(l),long:true,...longRun(l)}
-        :n===0&&q?{date:d,km:other,...q,quality:true}:{date:d,km:other,type:'Easy run',detail:EASY}).filter(s=>s.km>=1);
+        :n===0&&q?{date:d,km:half(m),...q,quality:true}:{date:d,km:half(m),type:'Easy run',detail:EASY});
     }
-    sessions=sessions.filter(s=>{if(s.race)return true;if(s.date<earliest||(prev&&daysBetween(prev,s.date)<(frequency<=3?2:1)))return false;prev=s.date;return true;});
-    result.push({start:ws,phase,km:walk!=null?null:half(sessions.reduce((n,s)=>n+(s.race?0:s.km),0)),longKm:walk!=null?null:half(l),sessions});
-    if(!raceWeek&&phase==='build'&&l>=GOAL_KM-.05)break;
+    sessions=sessions.filter(s=>s.race||s.date>=earliest);
+    result.push({start:ws,phase,km:walk!=null?null:half(sessions.reduce((n,s)=>n+(s.race||s.km==null?0:s.km),0)),longKm:l==null?null:half(l),sessions});
+    if(R==null&&phase==='build'&&l>=GOAL_KM-.05)break;
   }
   return result;
 }
 function outlook(weeks,profile){
   const longs=weeks.filter(w=>!['race','taper'].includes(w.phase)).flatMap(w=>w.sessions.filter(s=>s.long));
   const peak=Math.max(0,...longs.map(s=>s.km)),goal=longs.find(s=>s.km>=GOAL_KM-.05);
-  if(profile.raceDate)return peak>=GOAL_KM*.8?`Your long run builds to about ${peak.toFixed(1)} km before tapering into race day.`
-    :`At this gradual build your longest run reaches about ${peak.toFixed(1)} km before race day. Plan walk breaks for the race or choose a later event rather than speeding the plan up.`;
-  return goal?`At this gradual build you would cover the full 10 miles around ${dateOf(goal.date).toLocaleDateString(undefined,{day:'numeric',month:'long',year:'numeric'})}. Add a race date in Settings to taper towards it.`
+  const when=s=>dateOf(s.date).toLocaleDateString(undefined,{day:'numeric',month:'long'});
+  if(profile.raceDate)return peak>=GOAL_KM*.85?`Your long run builds to ${peak.toFixed(1)} km${goal?' on '+when(goal):''}, two weeks before race day, followed by a taper week and race week.`
+    :`There is not enough time for a safe build to 10 miles: your longest run reaches about ${peak.toFixed(1)} km before race day. Plan walk breaks for the race or choose a later event rather than speeding the plan up.`;
+  return goal?`At this build you would cover the full 10 miles around ${when(goal)}. Add a race date in Settings to taper towards it.`
     :'Add a race date in Settings to see a plan that tapers towards it.';
 }
 export function parseCSV(text) {
