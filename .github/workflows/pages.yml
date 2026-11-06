@@ -1,0 +1,46 @@
+name: Publish Stride
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: stride-pages
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Check JavaScript and prepare public files
+        run: |
+          node --check core.js
+          node --check imports.js
+          node --check app.js
+          node --check sw.js
+          mkdir -p _site
+          cp index.html style.css app.js core.js imports.js sw.js manifest.webmanifest icon.svg icon-180.png icon-192.png icon-512.png _site/
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+      - id: deploy
+        uses: actions/deploy-pages@v4
