@@ -25,6 +25,14 @@ have separate storage. The app is usable offline after its first complete online
 
 ## Log and adapt
 
+- Adding, editing or deleting an activity immediately recalculates the plan. Recent
+  runs without pain and with easy/moderate or unrecorded effort update the distance
+  baseline automatically. A logged 4 km run can replace an outdated 1 km baseline;
+  the next build weeks progress from that distance towards 10 miles.
+- A recent run of at least 3 km also moves an initial zero-baseline plan to distance
+  targets. Hard or painful runs and walks do not raise this baseline. Lighter weeks,
+  fatigue, rest intervals and race tapering still apply. If the week's remaining
+  mileage cannot fit a useful session, it is skipped rather than shown as a tiny long run.
 - Add and edit runs or walks with date, distance, duration, perceived effort and notes.
 - Choose 2–5 target runs per week. Runs remaining in the week are recalculated after
   you log what you actually did. Walks are retained but do not count as running mileage.

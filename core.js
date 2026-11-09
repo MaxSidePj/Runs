@@ -59,6 +59,16 @@ export function suggest(runs,profile,checkin={},today=isoDate()) {
   const last=recent[0], feeling=checkin.date===today?checkin.feeling:'normal';
   if(feeling==='pain'||allActivities.some(r=>r.pain&&daysBetween(r.date,today)>=0&&daysBetween(r.date,today)<=2)) return {kind:'rest',title:'Pause the running plan',body:'You reported pain. Rest from running and reassess; get advice from a clinician or physiotherapist if pain persists. This app cannot assess an injury.',sessions:[]};
   const stat=summary(runs,today), start=weekStart(today);
+  // Recompute from activities on every render, including edits and deletions.
+  // A hard or painful outlier must not raise the distance baseline.
+  const manageable=recent.filter(r=>r.date>=shift(today,-27)&&!r.pain&&(r.effort==null||r.effort<=6));
+  const loggedLong=Math.max(0,...manageable.map(r=>r.distanceKm));
+  const learnedDistance=loggedLong>=3;
+  if(loggedLong>profile.longestKm&&(profile.weeklyKm>0||learnedDistance)) {
+    const currentDays=profile.currentDays||Math.min(3,profile.targetDays);
+    profile={...profile,longestKm:loggedLong,currentDays,
+      weeklyKm:Math.max(profile.weeklyKm,loggedLong*(1+.6*(currentDays-1)))};
+  }
   const available=profile.days;
   const frequency=Math.min(available.length,profile.currentDays===0?Math.min(3,profile.targetDays):profile.targetDays);
   const selected=available.length<=frequency?available:[...available].filter((_,i)=>i===0||i===available.length-1||i%2===0).slice(0,frequency);
@@ -67,7 +77,7 @@ export function suggest(runs,profile,checkin={},today=isoDate()) {
   for(let w=1;w<=2;w++){const a=shift(start,-7*w),b=shift(a,7);complete.push(runs.filter(r=>r.date>=a&&r.date<b));}
   let target=profile.weeklyKm*Math.min(1,frequency/Math.max(1,profile.currentDays));
   let increase=false;
-  let reason='Use your recent baseline, scaled down if you choose fewer runs. Missed kilometres are not added to later sessions.';
+  let reason=loggedLong>0?'Your plan adapts to recent logged runs, including changes to their distance and effort. Longer runs update your starting distance; future weeks build from there.':'Use your recent baseline, scaled down if you choose fewer runs. Missed kilometres are not added to later sessions.';
   if(complete.every(w=>w.length>=frequency&&w.reduce((s,r)=>s+r.distanceKm,0)>=profile.weeklyKm*.9&&w.every(r=>!r.pain&&r.effort!=null&&r.effort<=6))&&feeling!=='tired') {
     const average=complete.reduce((s,w)=>s+w.reduce((n,r)=>n+r.distanceKm,0),0)/2;
     target=Math.min(average*1.05,average+1);
@@ -81,8 +91,9 @@ export function suggest(runs,profile,checkin={},today=isoDate()) {
   if(daysToRace!=null&&daysToRace<=7){target=profile.weeklyKm*.5;increase=false;reason='Race week: reduce training, keep sessions easy, and do not make up missed distance.';}
   target=Math.round(target*10)/10;
   const beginner=profile.weeklyKm===0;
-  const longBase=Math.max(profile.longestKm,stat.longest);
-  const longKm=Math.min(GOAL_KM,Math.max(0,Math.min(longBase?longBase+(increase ? 0.5 : 0):target*.35,target*.45)));
+  const longBase=profile.longestKm;
+  const reduction=baseTarget>0?Math.min(1,target/baseTarget):1;
+  const longKm=Math.min(GOAL_KM,target,(longBase+(increase ? 0.5 : 0))*reduction);
   const ordinary=frequency>1?Math.min(longBase||target,Math.max(0,(target-longKm)/(frequency-1))):target;
   const sessions=[];let earliest=today;
   const recovery=last?.effort>=7||feeling==='tired'?3:frequency<=3?2:1;
@@ -98,7 +109,9 @@ export function suggest(runs,profile,checkin={},today=isoDate()) {
     if(thisWeek&&remainingRuns===0)continue;
     const isLong=!beginner&&selected.length>1&&dateOf(d).getDay()===[...selected].sort((a,b)=>((a+6)%7)-((b+6)%7)).at(-1);
     const proposed=isLong?longKm:ordinary;
-    const km=beginner?null:Math.round(Math.min(proposed,thisWeek?remaining:target)*10)/10;
+    // Skip a session that no longer fits rather than label leftover mileage a long run.
+    if(!beginner&&remaining<proposed*(isLong?1:.8))continue;
+    const km=beginner?null:Math.round(Math.min(proposed,remaining)*10)/10;
     if(!beginner&&km<1)continue;
     sessions.push(beginner?{date:d,...runWalk(stage0)}:isLong?{date:d,km,long:true,...longRun(km)}:{date:d,type:'Easy run',km,detail:EASY});
     if(thisWeek){remaining=Math.max(0,remaining-(km||0));remainingRuns--;}
